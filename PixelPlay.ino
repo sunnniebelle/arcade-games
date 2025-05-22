@@ -1,5 +1,5 @@
 /// @file    main_file.ino
-/// @brief   ARCADE THING IDK, ONLY SNAKE FOR THE MOMENT
+/// @brief   ARCADE: SNAKE & PONG
 
 #include <FastLED.h>
 #include <MemoryFree.h>
