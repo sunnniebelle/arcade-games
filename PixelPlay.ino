@@ -1,0 +1,958 @@
+/// @file    main_file.ino
+/// @brief   ARCADE THING IDK, ONLY SNAKE FOR THE MOMENT
+
+#include <FastLED.h>
+#include <MemoryFree.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+#define LED_PIN     6
+#define NUM_LEDS    256
+#define BRIGHTNESS  64
+#define LED_TYPE    WS2812B
+#define COLOR_ORDER GRB
+CRGB leds[NUM_LEDS];
+
+#define UPDATES_PER_SECOND 100
+
+#define NUM_BUTTONS   6
+#define BUTTON_LEFT   13
+#define BUTTON_RIGHT  10
+#define BUTTON_UP     12
+#define BUTTON_DOWN   11
+#define BUTTON_ESCAPE 3
+#define BUTTON_SELECT 2
+
+#define STATE_SNAKE_INTRO 4000
+#define STATE_SNAKE_MENU_PLAY 4010
+#define STATE_SNAKE_MENU_SCORE 4020
+#define STATE_SNAKE_MENU_SETTING 4030
+#define STATE_SNAKE_SETUP 4011
+#define STATE_SNAKE_GAME 4012
+#define STATE_SNAKE_LOST 4019
+#define STATE_SNAKE_SCORE 4021
+#define STATE_SNAKE_SETTING 4031
+#define STATE_MENU_SNAKE  0004
+#define STATE_MENU_PONG   0005
+
+#define STATE_PONG_INTRO  5000
+#define STATE_PONG_SETUP  5001
+#define STATE_PONG_GAME   5002
+
+#define SCREEN_snakeIntro 0
+#define SCREEN_snakeLost 1
+#define SCREEN_snakeMenu 2
+#define SCREEN_snakeMenuPlay 3
+#define SCREEN_snakeMenuScore 4
+#define SCREEN_snakeMenuSetting 5
+#define SCREEN_snakeDiffEasy 6
+#define SCREEN_snakeDiffNorm 7
+#define SCREEN_snakeDiffHard 8
+#define SCREEN_pongIntro 9
+
+#define north 0
+#define south 2
+#define east 1
+#define west 3
+
+#define snake_easy 6
+#define snake_norm 4
+#define snake_hard 2
+#define snake_initLen 3
+#define snake_head 0x00aa00
+#define snake_body CRGB::ForestGreen
+#define snake_fruit CRGB::Crimson
+
+#define speed_dif 0.5
+
+CRGB BOARD[16][16];
+unsigned long CURRENT_STATE = STATE_SNAKE_INTRO;
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+
+void LOADSCREEN(int state);
+void SNAKE_intro();
+void SNAKE_menuPlay();
+void SNAKE_menuScore();
+void SNAKE_menuSetting();
+void SNAKE_score();
+void SNAKE_setting();
+void SNAKE_gameSetup();
+void SNAKE_game();
+void SNAKE_gameLost();
+void PONG_intro();
+void PONG_setup();
+void PONG_game();
+void checkDebounce();
+void refreshState();
+void contButton();
+
+struct snake_entity {
+  int dir = 0;
+  int next[NUM_LEDS + 5] = {1, 1, 1, 1}; // 0-North, 2-East, 1-South, 3-West
+  int len = 3;
+  int x = 4, y = 4;
+  int diff = snake_norm;
+  int highscore[3] = {0};
+  int score = snake_norm;
+} snake;
+
+struct pong {
+  int l_score = 0;
+  int r_score = 0;
+  int l_player = 6;
+  int r_player = 6;
+  int l_dir = 1;
+  int r_dir = 1;
+  int ball_x = 8;
+  int ball_y = 8;
+  int ball_dir = -1;
+  int ball_angle = 1;
+  double speed = 5;
+} pong;
+
+void BOARD_clear() {
+  for (int i = 0; i < 256; ++i) BOARD[i/16][i%16] = 0;
+}
+
+void LEDS_clear() {
+  for (int i = 0; i < 256; ++i) leds[i] = 0;
+}
+
+void BOARD_toLEDS() {
+  for (int i = 0; i < 256; ++i) leds[i] = BOARD[i/16][i%16];
+}
+
+void show() {
+  for (int i = 0; i < 16; i += 2) {
+    for (int j = 0; j < 8; ++j) {
+      CRGB temp = leds[i * 16 + j];
+      leds[i * 16 + j] = leds[i * 16 - j + 15];
+      leds[i * 16 - j + 15] = temp;
+    }
+  }
+  FastLED.show();
+}
+
+void printDisplay() {
+  lcd.clear();
+  switch (CURRENT_STATE) {
+    case STATE_SNAKE_INTRO:
+      lcd.print("    Sssnake!");
+      lcd.setCursor(0, 1);
+      lcd.print("Can u highscore?");
+      break;
+    case STATE_SNAKE_MENU_PLAY:
+      lcd.print(" Play the Snake");
+      break;
+    case STATE_SNAKE_MENU_SCORE:
+      lcd.print("  Highscores");
+      break;
+    case STATE_SNAKE_MENU_SETTING:
+      lcd.print("  Difficulty");
+      break;
+    case STATE_SNAKE_SETUP:
+      lcd.print("");
+      break;
+    case STATE_SNAKE_GAME:
+      char msgGame[16] = "   Score: 000   ";
+      int currscore = snake.len - snake_initLen;
+      msgGame[8] = currscore / 100 - '0';
+      msgGame[9] = (currscore) % 100 / 10 - '0';
+      msgGame[10] = currscore % 10 - '0';
+      lcd.print(msgGame);
+      break;
+    case STATE_SNAKE_LOST:
+      lcd.print("      Sad?       ");
+      break;
+    case STATE_SNAKE_SCORE:
+      char msgScore[16] = " Highscore: 000";
+      switch (snake.diff) {
+        case snake_easy:
+          lcd.print(" Easy");
+          msgScore[12] = snake.highscore[0] / 100 - '0';
+          msgScore[13] = (snake.highscore[0]) % 100 / 10 - '0';
+          msgScore[14] = snake.highscore[0] % 10 - '0';
+          break;
+        case snake_norm:
+          lcd.print(" Normal");
+          msgScore[12] = snake.highscore[1] / 100 - '0';
+          msgScore[13] = (snake.highscore[1]) % 100 / 10 - '0';
+          msgScore[14] = snake.highscore[1] % 10 - '0';
+          break;
+        case snake_hard:
+          lcd.print(" Hard");
+          msgScore[12] = snake.highscore[2] / 100 - '0';
+          msgScore[13] = (snake.highscore[2]) % 100 / 10 - '0';
+          msgScore[14] = snake.highscore[2] % 10 - '0';
+          break;
+        default:
+          lcd.print("No difficulty");
+      }
+      lcd.setCursor(0, 1);
+      lcd.print(msgScore);
+      break;
+    case STATE_SNAKE_SETTING:
+      lcd.print("   Difficulty");
+      lcd.setCursor(0, 1);
+      switch (snake.diff) {
+        case snake_easy:
+          lcd.print("      Easy");
+          break;
+        case snake_norm:
+          lcd.print("     Normal");
+          break;
+        case snake_hard:
+          lcd.print("      Hard");
+          break;
+        default:
+          lcd.print("No difficulty");
+      }
+      break;
+    default:
+      lcd.print("unknown state");
+  }
+}
+
+void DEFAULT_SCREEN() {
+  return;
+}
+
+int clk = 0;
+int menu_cnt = 0;
+unsigned long prev = 0;
+
+void setup() {
+  delay( 3000 ); // power-up safety delay
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.setBrightness(  BRIGHTNESS );
+
+  pinMode(BUTTON_UP, INPUT_PULLUP);
+  pinMode(BUTTON_LEFT, INPUT_PULLUP);
+  pinMode(BUTTON_DOWN, INPUT_PULLUP);
+  pinMode(BUTTON_RIGHT, INPUT_PULLUP);
+  pinMode(BUTTON_SELECT, INPUT_PULLUP);
+  pinMode(BUTTON_ESCAPE, INPUT_PULLUP);
+  
+  CURRENT_STATE = STATE_MENU_SNAKE;
+  randomSeed(analogRead(0));
+  Serial.begin(9600);
+}
+
+void loop()
+{
+  // void printDisplay();
+
+  
+  if (millis() - prev >= 100) {
+    clk = 1;
+    prev = millis();
+  }
+  
+  if (CURRENT_STATE == STATE_SNAKE_MENU_PLAY || CURRENT_STATE == STATE_SNAKE_MENU_SCORE || CURRENT_STATE == STATE_SNAKE_MENU_SETTING
+    || CURRENT_STATE == STATE_MENU_SNAKE || CURRENT_STATE == STATE_MENU_PONG)
+    checkDebounce();
+  else
+    contButton();
+
+  if (clk == 1) {
+    refreshState();
+    clk = 0;
+  }
+  FastLED.show();
+}
+
+void MENU_snake() {
+  LOADSCREEN(SCREEN_snakeIntro);
+  show();
+}
+
+void MENU_pong() {
+  LOADSCREEN(SCREEN_pongIntro);
+  show();
+}
+
+// Snake Game code
+
+void SNAKE_intro() {
+  if (menu_cnt++ < 2) {
+    LOADSCREEN(SCREEN_snakeIntro);
+    show();
+    return;
+  }
+
+  menu_cnt = 0;
+  CURRENT_STATE = STATE_SNAKE_MENU_PLAY;
+}
+
+void SNAKE_menu() {
+  if (menu_cnt++ < 4) {
+    LOADSCREEN(SCREEN_snakeMenu);
+  } else {
+    LOADSCREEN(CURRENT_STATE == STATE_SNAKE_MENU_PLAY ? SCREEN_snakeMenuPlay : 
+    CURRENT_STATE == STATE_SNAKE_MENU_SCORE ? SCREEN_snakeMenuScore :
+    CURRENT_STATE == STATE_SNAKE_MENU_SETTING ? SCREEN_snakeMenuSetting : 0);
+    
+    if (menu_cnt > 5) menu_cnt = 0;
+  }
+  show();
+}
+
+void SNAKE_score() {
+  LOADSCREEN(snake.score == snake_norm ? SCREEN_snakeDiffNorm :
+    snake.score == snake_hard ? SCREEN_snakeDiffHard : SCREEN_snakeDiffEasy );
+  show();
+}
+
+void SNAKE_setting() {
+  LOADSCREEN(snake.diff == snake_norm ? SCREEN_snakeDiffNorm :
+    snake.diff == snake_hard ? SCREEN_snakeDiffHard : SCREEN_snakeDiffEasy );
+  show();
+}
+
+void SNAKE_gameSetup() {
+  snake.dir = north;
+  snake.len = snake_initLen;
+  for (int i = 0; i < snake_initLen - 1; ++i)
+    snake.next[i] = south;
+  snake.x = 8;
+  snake.y = 8;
+  SNAKE_genFruit();
+
+  delay(500);
+
+  CURRENT_STATE = STATE_SNAKE_GAME;
+}
+
+void SNAKE_game() {
+  if (menu_cnt++ < snake.diff) return;
+  SNAKE_move();
+  BOARD_clear();
+  SNAKE_draw();
+  BOARD_toLEDS();
+  show();
+
+  snake.highscore[0] = snake.diff == snake_easy ? max(snake.highscore[0], snake.len - snake_initLen) : snake.highscore[0];
+  snake.highscore[1] = snake.diff == snake_norm ? max(snake.highscore[1], snake.len - snake_initLen) : snake.highscore[1];
+  snake.highscore[2] = snake.diff == snake_hard ? max(snake.highscore[2], snake.len - snake_initLen) : snake.highscore[2];
+  menu_cnt = 0;
+}
+
+void SNAKE_gameLost() {
+  for (int i = 0; i < 2; ++i) {
+    LOADSCREEN(SCREEN_snakeLost);
+    show();
+    delay(1500);
+    LEDS.clear();
+    show();
+    delay(500);
+  }
+  CURRENT_STATE = STATE_SNAKE_INTRO;
+}
+
+struct fruit_entity {
+  int x, y;
+} fruit;
+
+void next_move(int direction, int* x, int* y, int* rev) {
+  switch (direction) {
+    case north:
+      *x = *x == 0 ? 15 : *x - 1;
+      *rev = south;
+      break;
+    case south:
+      *x = *x == 15 ? 0 : *x + 1;
+      *rev = north;
+      break;
+    case east:
+      *y = *y == 15 ? 0 : *y + 1;
+      *rev = west;
+      break;
+    case west:
+      *y = *y == 0 ? 15 : *y - 1;
+      *rev = east;
+      break;
+    default:
+      *rev = -1;
+  }
+}
+
+void SNAKE_genFruit() {
+  int fruitPos = random(256);
+
+  while(BOARD[fruitPos/16][fruitPos%16] != 0) fruitPos = random(256);
+
+  fruit.x = fruitPos/16;
+  fruit.y = fruitPos%16;
+};
+
+// draws snake on the board
+void SNAKE_draw() {
+  int x = snake.x, y = snake.y, i = 0, dummy;
+  BOARD[x][y] = snake_head;
+
+  while(i < snake.len - 1) {
+    next_move(snake.next[i], &x, &y, &dummy);
+    if (BOARD[x][y] == snake_head) CURRENT_STATE = STATE_SNAKE_LOST;
+    BOARD[x][y] = snake_body + i++ * 15;
+  }
+  
+  BOARD[fruit.x][fruit.y] = snake_fruit;
+}
+
+void SNAKE_move() {
+  int temp_next = snake.next[0];
+
+  next_move(snake.dir != snake.next[0] ? snake.dir : (snake.dir + 2) % 4, &snake.x, &snake.y, &temp_next);
+
+  if (fruit.x == snake.x && fruit.y == snake.y) {
+    snake.len++;
+    SNAKE_genFruit();
+  }
+
+  for (int i = snake.len - 1; i > 0; --i) snake.next[i] = snake.next[i - 1];
+  snake.next[snake.len - 1] = 0;
+  snake.next[0] = temp_next;
+}
+
+void PONG_intro() {
+  if (menu_cnt++ < 2) {
+    LOADSCREEN(SCREEN_pongIntro);
+    show();
+    return;
+  }
+
+  menu_cnt = 0;
+  CURRENT_STATE = STATE_PONG_SETUP;
+}
+
+void PONG_setup() {
+  pong.l_player = 6;
+  pong.r_player = 6;
+  pong.l_dir = 0;
+  pong.r_dir = 0;
+  pong.ball_x = 8;
+  pong.ball_y = millis() % 16;
+  pong.ball_dir = (millis() % 2 == 0) ? -1 : 1;
+  pong.ball_angle = (millis() % 2 == 0) ? 1 : -1; // (mili() % 5 + 1) * 15 - (mili() % 2) * 90
+  pong.speed = 5;
+  CURRENT_STATE = STATE_PONG_GAME;
+}
+
+void PONG_game() {
+  pong_move();
+  BOARD_clear();
+  pong_draw();
+  BOARD_toLEDS();
+  show();
+}
+
+void pong_move() {
+  if (menu_cnt++ > int(pong.speed)) {
+    pong.ball_x += pong.ball_dir;
+    pong.ball_y += pong.ball_angle;
+    Serial.print("BALL MOVED");
+    menu_cnt = 0;
+  }
+
+  if (pong.l_player > 0 && pong.l_dir == -1)
+    pong.l_player--;
+  else if (pong.l_player < 13 && pong.l_dir == 1)
+    pong.l_player++;
+
+  if (pong.r_player > 0 && pong.r_dir == -1)
+    pong.r_player--;
+  else if (pong.r_player < 13 && pong.r_dir == 1)
+    pong.r_player++;
+
+  if (pong.l_player <= pong.ball_y && pong.ball_y <= pong.l_player + 2 && pong.ball_x == 1) {
+    pong.ball_dir = 1;
+    pong.speed -= speed_dif;
+  } 
+  if (pong.ball_x == 0) {
+    pong.r_score++;
+    pong.ball_x = 8;
+    pong.ball_y = millis() % 16;
+    pong.ball_dir = -1;
+    pong.speed = 4;
+  }
+
+  if (pong.ball_x == 14 && pong.r_player <= pong.ball_y && pong.ball_y <= pong.r_player + 2) {
+    pong.ball_dir = -1;
+    pong.speed -= speed_dif;
+  }
+  
+  if (pong.ball_x == 15) {
+    pong.l_score++;
+    pong.ball_x = 8;
+    pong.ball_y = millis() % 16;
+    pong.ball_dir = 1;
+    pong.speed = 4;
+  }
+
+  Serial.println("IN pong move");
+
+  if (pong.ball_y == 0) 
+    pong.ball_angle = 1;
+  if (pong.ball_y == 15) 
+    pong.ball_angle = -1;
+
+  pong.l_dir = 0;
+  pong.r_dir = 0;
+}
+
+void pong_draw() {
+  BOARD[int(pong.ball_y)][pong.ball_x] = CRGB::Crimson;
+
+  BOARD[pong.l_player][0] = CRGB::ForestGreen;
+  BOARD[pong.l_player + 1][0] = CRGB::ForestGreen;
+  BOARD[pong.l_player + 2][0] = CRGB::ForestGreen;
+
+  BOARD[pong.r_player][15] = CRGB::ForestGreen;
+  BOARD[pong.r_player + 1][15] = CRGB::ForestGreen;
+  BOARD[pong.r_player + 2][15] = CRGB::ForestGreen;
+}
+
+int reading[NUM_BUTTONS] = { 1, 1, 1, 1, 1, 1 };
+int buttonState[NUM_BUTTONS] = { 1, 1, 1, 1, 1, 1 };
+int lastButtonState[NUM_BUTTONS] = { 1, 1, 1, 1, 1, 1 };
+unsigned long lastDebounceTime[NUM_BUTTONS] = { 0 };  // the last time the output pin was toggled
+unsigned long debounceDelay = 50;    // the debounce time; increase if the output flickers
+
+int buttonTable[] = {BUTTON_UP, BUTTON_RIGHT, BUTTON_DOWN, BUTTON_LEFT, BUTTON_SELECT, BUTTON_ESCAPE};
+
+void buttonPressed(int button) {
+  switch(CURRENT_STATE) {
+    case STATE_MENU_SNAKE:
+      switch(button) {
+        case BUTTON_UP:
+          CURRENT_STATE = STATE_MENU_PONG;
+          break;
+        case BUTTON_LEFT:
+          CURRENT_STATE = STATE_MENU_PONG;
+          break;
+        case BUTTON_RIGHT:
+          CURRENT_STATE = STATE_MENU_PONG;
+          break;
+        case BUTTON_DOWN:
+          CURRENT_STATE = STATE_MENU_PONG;
+          break;
+        case BUTTON_SELECT:
+          CURRENT_STATE = STATE_SNAKE_INTRO;
+          break;
+        default:
+          return;
+      }
+      break;
+    case STATE_MENU_PONG:
+      switch(button) {
+        case BUTTON_UP:
+          CURRENT_STATE = STATE_MENU_SNAKE;
+          break;
+        case BUTTON_LEFT:
+          CURRENT_STATE = STATE_MENU_SNAKE;
+          break;
+        case BUTTON_RIGHT:
+          CURRENT_STATE = STATE_MENU_SNAKE;
+          break;
+        case BUTTON_DOWN:
+          CURRENT_STATE = STATE_MENU_SNAKE;
+          break;
+        case BUTTON_SELECT:
+          CURRENT_STATE = STATE_PONG_INTRO;
+          break;
+        default:
+          return;
+      }
+    case STATE_SNAKE_GAME:
+      switch(button) {
+        case BUTTON_UP:
+          snake.dir = north;
+          break;
+        case BUTTON_DOWN:
+          snake.dir = south;
+          break;
+        case BUTTON_RIGHT:
+          snake.dir = east;
+          break;
+        case BUTTON_LEFT:
+          snake.dir = west;
+          break;
+        case BUTTON_ESCAPE:
+          CURRENT_STATE = STATE_SNAKE_MENU_PLAY;
+          break;
+        default:
+          return;
+      }
+      break;
+    case STATE_SNAKE_MENU_PLAY:
+      switch(button) {
+        case BUTTON_RIGHT:
+          CURRENT_STATE = STATE_SNAKE_MENU_SCORE;
+          break;
+        case BUTTON_SELECT:
+          CURRENT_STATE = STATE_SNAKE_SETUP;
+          break;
+        case BUTTON_ESCAPE:
+          CURRENT_STATE = STATE_MENU_SNAKE;
+          break;
+        default:
+          return;
+      }
+      break;
+    case STATE_SNAKE_MENU_SCORE:
+      switch(button) {
+        case BUTTON_LEFT:
+          CURRENT_STATE = STATE_SNAKE_MENU_PLAY;
+          break;
+        case BUTTON_DOWN:
+          CURRENT_STATE = STATE_SNAKE_MENU_SETTING;
+          break;
+        case BUTTON_SELECT:
+          CURRENT_STATE = STATE_SNAKE_SCORE;
+          break;
+        case BUTTON_ESCAPE:
+          CURRENT_STATE = STATE_MENU_SNAKE;
+          break;
+        default:
+          return;
+      }
+      break;
+    case STATE_SNAKE_MENU_SETTING:
+      switch(button) {
+        case BUTTON_UP:
+          CURRENT_STATE = STATE_SNAKE_MENU_SCORE;
+          break;
+        case BUTTON_LEFT:
+          CURRENT_STATE = STATE_SNAKE_MENU_PLAY;
+          break;
+        case BUTTON_SELECT:
+          CURRENT_STATE = STATE_SNAKE_SETTING;
+          break;
+        case BUTTON_ESCAPE:
+          CURRENT_STATE = STATE_MENU_SNAKE;
+          break;
+        default:
+          return;
+      }
+      break;
+    case STATE_SNAKE_SCORE:
+      switch(button) {
+        case BUTTON_SELECT:
+          snake.score = (snake.score == snake_easy ? snake_norm : snake.score == snake_norm ? snake_hard : snake_easy);
+          break;
+        case BUTTON_ESCAPE:
+          CURRENT_STATE = STATE_SNAKE_MENU_SCORE;
+          break;
+        default:
+          return;
+      }
+      break;
+    case STATE_SNAKE_SETTING:
+      switch(button) {
+        case BUTTON_SELECT:
+          snake.diff = (snake.diff == snake_easy ? snake_norm : snake.diff == snake_norm ? snake_hard : snake_easy);
+          break;
+        case BUTTON_ESCAPE:
+          CURRENT_STATE = STATE_SNAKE_MENU_SETTING;
+          break;
+        default:
+          return;
+      }
+      break;
+    case STATE_PONG_GAME:
+      switch(button) {
+        case BUTTON_LEFT:
+          pong.l_dir = -1;
+          break;
+        case BUTTON_DOWN:
+          pong.l_dir = 1;
+          break;
+        case BUTTON_SELECT:
+          pong.r_dir = -1;
+          break;
+        case BUTTON_ESCAPE:
+          pong.r_dir = 1;
+          break;
+        case BUTTON_UP:
+          CURRENT_STATE = STATE_MENU_PONG;
+          break;
+        default:
+          return;
+      }
+      break;
+    default:
+      return;
+  }
+}
+
+void checkDebounce() {
+  for (int i = 0; i < NUM_BUTTONS; ++i) {
+    reading[i] = digitalRead(buttonTable[i]);
+    char msg[3];
+    if (reading[i] == 0x0) {
+      msg[0] = 'L'; msg[1] = 'O'; msg[2] = 'W';
+    } else {
+      msg[0] = 'H'; msg[1] = 'I'; msg[2] = 'G';
+    }
+    Serial.print(msg);
+    Serial.print(" : ");
+
+    if (reading[i] != lastButtonState[i]) {
+      lastDebounceTime[i] = millis();
+    }
+
+    if ((millis() - lastDebounceTime[i]) > debounceDelay) {
+
+      if (reading[i] != buttonState[i]) {
+        buttonState[i] = reading[i];
+
+        if (buttonState[i] == LOW) {
+          buttonPressed(buttonTable[i]);
+        }
+      }
+    }
+
+    lastButtonState[i] = reading[i];
+  }
+  Serial.print(CURRENT_STATE);
+  Serial.println("");
+}
+
+void contButton() {
+  for (int i = 0; i < NUM_BUTTONS; ++i) {
+    reading[i] = digitalRead(buttonTable[i]);
+    if (reading[i] == LOW)
+      buttonPressed(buttonTable[i]);
+  }
+}
+
+const uint32_t pong_intro[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+};
+
+const uint32_t snake_lost[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00D00000, 0x00D00000, 0x00D00000, 0x00000000, 0x00D00000, 0x00D00000, 0x00D00000, 0x00000000, 0x00D00000, 0x00D00000, 0x00D00000, 
+  0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 
+  0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 
+  0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00D00000, 0x00D00000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 
+  0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 
+  0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 
+  0x00D00000, 0x00D00000, 0x00D00000, 0x00000000, 0x00D00000, 0x00D00000, 0x00D00000, 0x00D00000, 0x00000000, 0x00D00000, 0x00D00000, 0x00D00000, 0x00000000, 0x00000000, 0x00D00000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 
+};
+
+const uint32_t snake_start[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00488048, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 
+  0x00000000, 0x00000000, 0x00488048, 0x00488048, 0x00488048, 0x00000000, 0x00488048, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00488048, 0x00488048, 0x00488048, 0x00000000, 
+  0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 
+  0x00000000, 0x00488048, 0x00488048, 0x00488048, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00488048, 0x00488048, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00488048, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00488048, 0x00488048, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00488048, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00488048, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+};
+
+const uint32_t snake_menu[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x008080FF, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00FF7EFF, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x00000000, 0x008080FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x008080FF, 0x008080FF, 0x00000000, 0x0000FF80, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x00000000, 0x008080FF, 0x00000000, 0x0000FF80, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 
+  0x00000000, 0x00002D50, 0x00000000, 0x00000000, 0x0000FF80, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00003F70, 0x00005190, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x000063B0, 0x000075D0, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x000087F0, 0x0044FF44, 0x00000000, 0x00FF0000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+};
+
+const uint32_t snake_menu_play[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 
+  0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x008080FF, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x008080FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x00000000, 0x008080FF, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 
+  0x00000000, 0x00002D50, 0x00000000, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00003F70, 0x00005190, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x000063B0, 0x000075D0, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x000087F0, 0x0044FF44, 0x00000000, 0x00FF0000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+};
+
+const uint32_t snake_menu_score[] PROGMEM = { 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x008080FF, 0x008080FF, 0x00000000, 0x00FF7EFF, 0x00FF7EFF, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x00000000, 0x008080FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x008080FF, 0x008080FF, 0x00000000, 0x0000FF80, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x00000000, 0x008080FF, 0x00000000, 0x0000FF80, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 
+  0x00000000, 0x00002D50, 0x00000000, 0x00000000, 0x0000FF80, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00003F70, 0x00005190, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x000063B0, 0x000075D0, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x000087F0, 0x0044FF44, 0x00000000, 0x00FF0000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+};
+
+const uint32_t snake_menu_setting[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x0000FF00, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 0x00FFFF00, 0x00000000, 
+  0x00000000, 0x0000FF00, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x008080FF, 0x00000000, 0x00000000, 0x00000000, 0x00FF7EFF, 0x00FF7EFF, 0x00000000, 0x00000000, 0x00FFFF00, 0x00FFFF00, 0x00FFFF00, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x00000000, 0x008080FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x008080FF, 0x008080FF, 0x00000000, 0x0000FF80, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x008080FF, 0x00000000, 0x008080FF, 0x00000000, 0x0000FF80, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00808080, 0x00000000, 0x00000000, 
+  0x00000000, 0x00002D50, 0x00000000, 0x00000000, 0x0000FF80, 0x0000FF80, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00003F70, 0x00005190, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x000063B0, 0x000075D0, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x000087F0, 0x0044FF44, 0x00000000, 0x00FF0000, 0x00000000, 0x00000000, 0x00000000, 0x00808080, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+};
+
+const uint32_t snake_diff_easy[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00008020, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00008020, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FF88FF, 0x00FF88FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FF88FF, 0x00FF88FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00145214, 0x00145214, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00145214, 0x00008020, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00008020, 0x00008020, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00008020, 0x00008020, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+};
+
+const uint32_t snake_diff_norm[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x00DDB687, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x008A450D, 0x00DDB687, 0x00DDB687, 0x00DDB687, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00DDB687, 0x00DDB687, 
+  0x00000000, 0x00000000, 0x00000000, 0x00DDB687, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x008A450D, 0x008A450D, 0x00DDB687, 
+  0x00000000, 0x00000000, 0x008A450D, 0x00DDB687, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x00404040, 0x008A450D, 0x00000000, 
+  0x00000000, 0x008A450D, 0x008A450D, 0x00DDB687, 0x00DDB687, 0x00DDB687, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00404040, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 
+  0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00404040, 0x00404040, 0x00000000, 0x00000000, 0x00000000, 
+  0x008A450D, 0x008A450D, 0x008A450D, 0x00DDB687, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x008A450D, 0x008A450D, 0x008A450D, 0x00DDB687, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00FF88FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00DDB687, 0x00DDB687, 0x00DDB687, 0x008A450D, 0x00000000, 0x00000000, 0x00FF88FF, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00DDB687, 0x00DDB687, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00DDB687, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00DDB687, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 
+  0x00000000, 0x00000000, 0x008A450D, 0x00DDB687, 0x008A450D, 0x00DDB687, 0x00DDB687, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x008A450D, 0x00606060, 0x00606060, 0x008A450D, 0x00000000, 
+  0x00000000, 0x00DDB687, 0x008A450D, 0x008A450D, 0x00DDB687, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x00606060, 0x008A450D, 0x00606060, 0x008A450D, 0x00000000, 
+  0x008A450D, 0x00DDB687, 0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x00606060, 0x00606060, 0x00606060, 0x008A450D, 0x008A450D, 
+  0x008A450D, 0x00DDB687, 0x00DDB687, 0x00DDB687, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 0x008A450D, 
+  0x008A450D, 0x008A450D, 0x008A450D, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008A450D, 0x008A450D, 0x00DDB687, 
+};
+
+const uint32_t snake_diff_hard[] PROGMEM = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00000000, 0x008000FF, 0x00A02800, 0x00A02800, 0x008000FF, 0x00000000, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00000000, 
+  0x00000000, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00000000, 
+  0x00A02800, 0x00000000, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00000000, 0x00A02800, 0x00A02800, 0x00000000, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00000000, 0x00A02800, 
+  0x00A02800, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00000000, 0x00000000, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00A02800, 
+  0x00A02800, 0x00A02800, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00A02800, 0x00A02800, 
+  0x00000000, 0x00A02800, 0x00A02800, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00A02800, 0x00A02800, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00A02800, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00905100, 0x00A02800, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00301B00, 0x00301B00, 0x00301B00, 0x00301B00, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00905100, 0x00905100, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00905100, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00301B00, 0x00301B00, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00301B00, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00905100, 0x00905100, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00301B00, 0x00301B00, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00A02800, 0x00000000, 
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00905100, 0x00905100, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00A02800, 0x00000000, 0x00000000, 
+  0x00000000, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00A02800, 0x00000000, 0x00000000, 0x00000000, 
+};
+
+
+
+uint32_t* arr[]  = {snake_start, snake_lost, snake_menu, snake_menu_play, snake_menu_score, snake_menu_setting, snake_diff_easy, snake_diff_norm, snake_diff_hard, pong_intro};
+
+void LOADSCREEN(int screen) {
+  for (int i = 0; i < 256; ++i) {
+     
+    leds[i] = pgm_read_dword(&arr[screen][i]);
+  }
+
+}
+
+void refreshState() {
+  if (CURRENT_STATE == STATE_MENU_SNAKE)
+    MENU_snake();
+  else if (CURRENT_STATE == STATE_MENU_PONG)
+    MENU_pong();
+  if (CURRENT_STATE == STATE_SNAKE_INTRO)
+    SNAKE_intro();
+  else if (CURRENT_STATE == STATE_SNAKE_MENU_PLAY || CURRENT_STATE == STATE_SNAKE_MENU_SCORE || CURRENT_STATE == STATE_SNAKE_MENU_SETTING) 
+    SNAKE_menu();
+  else if (CURRENT_STATE == STATE_SNAKE_SETUP)
+    SNAKE_gameSetup();
+  else if (CURRENT_STATE == STATE_SNAKE_GAME)
+    SNAKE_game();
+  else if (CURRENT_STATE == STATE_SNAKE_LOST)
+    SNAKE_gameLost();
+  else if (CURRENT_STATE == STATE_SNAKE_SCORE)
+    SNAKE_score();
+  else if (CURRENT_STATE == STATE_SNAKE_SETTING)
+    SNAKE_setting();
+  else if (CURRENT_STATE == STATE_PONG_INTRO)
+    PONG_intro();
+  else if (CURRENT_STATE == STATE_PONG_SETUP)
+    PONG_setup();
+  else if (CURRENT_STATE == STATE_PONG_GAME)
+    PONG_game();
+  else
+    DEFAULT_SCREEN();
+}
